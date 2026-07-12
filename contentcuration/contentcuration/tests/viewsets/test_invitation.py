@@ -3,6 +3,11 @@ import uuid
 from django.urls import reverse
 
 from contentcuration import models
+from contentcuration.constants.organization_roles import ORGANIZATION_ADMIN
+from contentcuration.constants.organization_roles import ORGANIZATION_EDITOR
+from contentcuration.constants.organization_roles import (
+    ORGANIZATION_ROLE_STATUS_ACTIVE,
+)
 from contentcuration.tests import testdata
 from contentcuration.tests.base import StudioAPITestCase
 from contentcuration.tests.viewsets.base import generate_create_event
@@ -344,6 +349,196 @@ class SyncTestCase(SyncTestMixin, StudioAPITestCase):
             self.fail("Invitation 2 was not deleted")
         except models.Invitation.DoesNotExist:
             pass
+
+
+class OrganizationInvitationSyncTestCase(SyncTestMixin, StudioAPITestCase):
+    @property
+    def invitation_metadata(self):
+        return {
+            "id": uuid.uuid4().hex,
+            "organization": self.organization.id,
+            "email": self.invited_user.email,
+        }
+
+    def setUp(self):
+        super(OrganizationInvitationSyncTestCase, self).setUp()
+        self.organization = testdata.organization()
+        self.org_admin = testdata.user("org-admin@inc.com")
+        testdata.organization_role(self.org_admin, self.organization)
+        self.invited_user = testdata.user("org-invitee@inc.com")
+        self.client.force_authenticate(user=self.org_admin)
+
+    def test_create_organization_invitation(self):
+        invitation = self.invitation_metadata
+        response = self.sync_changes(
+            [
+                generate_create_event(
+                    invitation["id"],
+                    INVITATION,
+                    invitation,
+                    organization_id=self.organization.id,
+                    user_id=self.invited_user.id,
+                )
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        try:
+            models.Invitation.objects.get(id=invitation["id"])
+        except models.Invitation.DoesNotExist:
+            self.fail("Organization invitation was not created")
+
+    def test_create_organization_invitation_by_non_admin_rejected(self):
+        editor = testdata.user("org-editor@inc.com")
+        testdata.organization_role(editor, self.organization, role=ORGANIZATION_EDITOR)
+        self.client.force_authenticate(user=editor)
+
+        invitation = self.invitation_metadata
+        response = self.sync_changes(
+            [
+                generate_create_event(
+                    invitation["id"],
+                    INVITATION,
+                    invitation,
+                    organization_id=self.organization.id,
+                    user_id=self.invited_user.id,
+                )
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        try:
+            models.Invitation.objects.get(id=invitation["id"])
+            self.fail("Organization invitation was created by a non-admin")
+        except models.Invitation.DoesNotExist:
+            pass
+
+    def test_create_invitation_requires_channel_or_organization(self):
+        self.client.force_authenticate(user=self.invited_user)
+        invitation = {
+            "id": uuid.uuid4().hex,
+            "email": self.invited_user.email,
+        }
+        response = self.sync_changes(
+            [
+                generate_create_event(
+                    invitation["id"],
+                    INVITATION,
+                    invitation,
+                    user_id=self.invited_user.id,
+                )
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        try:
+            models.Invitation.objects.get(id=invitation["id"])
+            self.fail("Invitation without channel or organization was created")
+        except models.Invitation.DoesNotExist:
+            pass
+
+    def test_accept_organization_invitation_creates_role(self):
+        invitation = models.Invitation.objects.create(
+            id=uuid.uuid4().hex,
+            organization=self.organization,
+            email=self.invited_user.email,
+            sender=self.org_admin,
+        )
+        self.client.force_authenticate(user=self.invited_user)
+        response = self.sync_changes(
+            [
+                generate_update_event(
+                    invitation.id,
+                    INVITATION,
+                    {"accepted": True},
+                    user_id=self.invited_user.id,
+                )
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        invitation.refresh_from_db()
+        self.assertTrue(invitation.accepted)
+        role = models.OrganizationRole.objects.get(
+            user=self.invited_user, organization=self.organization
+        )
+        self.assertEqual(role.role, ORGANIZATION_EDITOR)
+        self.assertEqual(role.status, ORGANIZATION_ROLE_STATUS_ACTIVE)
+
+    def test_revoke_organization_invitation_by_admin(self):
+        invitation = models.Invitation.objects.create(
+            id=uuid.uuid4().hex,
+            organization=self.organization,
+            email=self.invited_user.email,
+            sender=self.org_admin,
+        )
+        response = self.sync_changes(
+            [
+                generate_update_event(
+                    invitation.id,
+                    INVITATION,
+                    {"revoked": True},
+                    organization_id=self.organization.id,
+                    user_id=self.invited_user.id,
+                )
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        invitation.refresh_from_db()
+        self.assertTrue(invitation.revoked)
+
+    def test_revoke_organization_invitation_by_non_admin_rejected(self):
+        editor = testdata.user("org-editor2@inc.com")
+        testdata.organization_role(editor, self.organization, role=ORGANIZATION_EDITOR)
+        self.client.force_authenticate(user=editor)
+
+        invitation = models.Invitation.objects.create(
+            id=uuid.uuid4().hex,
+            organization=self.organization,
+            email=self.invited_user.email,
+            sender=self.org_admin,
+        )
+        response = self.sync_changes(
+            [
+                generate_update_event(
+                    invitation.id,
+                    INVITATION,
+                    {"revoked": True},
+                    organization_id=self.organization.id,
+                    user_id=self.invited_user.id,
+                )
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        invitation.refresh_from_db()
+        self.assertFalse(invitation.revoked)
+
+    def test_channel_invitation_with_organization_admin_role(self):
+        channel = testdata.channel()
+        channel.editors.add(self.org_admin)
+        invitation = models.Invitation.objects.create(
+            id=uuid.uuid4().hex,
+            channel=channel,
+            organization=self.organization,
+            email=self.invited_user.email,
+            sender=self.org_admin,
+            share_mode="admin",
+        )
+        self.client.force_authenticate(user=self.invited_user)
+        response = self.sync_changes(
+            [
+                generate_update_event(
+                    invitation.id,
+                    INVITATION,
+                    {"accepted": True},
+                    user_id=self.invited_user.id,
+                )
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        invitation.refresh_from_db()
+        self.assertTrue(invitation.accepted)
+        self.assertTrue(channel.editors.filter(pk=self.invited_user.id).exists())
+        role = models.OrganizationRole.objects.get(
+            user=self.invited_user, organization=self.organization
+        )
+        self.assertEqual(role.role, ORGANIZATION_ADMIN)
 
 
 class CRUDTestCase(StudioAPITestCase):

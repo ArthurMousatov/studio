@@ -1894,6 +1894,38 @@ class Organization(models.Model):
     def __str__(self):
         return self.name
 
+    @classmethod
+    def filter_edit_queryset(cls, queryset, user):
+        if user.is_anonymous:
+            return queryset.none()
+
+        if user.is_admin:
+            return queryset
+
+        return queryset.filter(
+            user_roles__user=user,
+            user_roles__role=ORGANIZATION_ADMIN,
+            user_roles__status=ORGANIZATION_ROLE_STATUS_ACTIVE,
+        ).distinct()
+
+    @classmethod
+    def filter_view_queryset(cls, queryset, user):
+        if user.is_anonymous:
+            return queryset.none()
+
+        if user.is_admin:
+            return queryset
+
+        return queryset.filter(
+            user_roles__user=user,
+            user_roles__role__in=[
+                ORGANIZATION_ADMIN,
+                ORGANIZATION_EDITOR,
+                ORGANIZATION_VIEWER,
+            ],
+            user_roles__status=ORGANIZATION_ROLE_STATUS_ACTIVE,
+        ).distinct()
+
 
 class OrganizationRole(models.Model):
     """
@@ -3788,7 +3820,14 @@ class Invitation(models.Model):
             return queryset
 
         return queryset.filter(
-            Q(email__iexact=user.email) | Q(sender=user) | Q(channel__editors=user)
+            Q(email__iexact=user.email)
+            | Q(sender=user)
+            | Q(channel__editors=user)
+            | Q(
+                organization__user_roles__user=user,
+                organization__user_roles__role=ORGANIZATION_ADMIN,
+                organization__user_roles__status=ORGANIZATION_ROLE_STATUS_ACTIVE,
+            )
         ).distinct()
 
     @classmethod
@@ -3803,6 +3842,15 @@ class Invitation(models.Model):
             | Q(sender=user)
             | Q(channel__editors=user)
             | Q(channel__viewers=user)
+            | Q(
+                organization__user_roles__user=user,
+                organization__user_roles__role__in=[
+                    ORGANIZATION_ADMIN,
+                    ORGANIZATION_EDITOR,
+                    ORGANIZATION_VIEWER,
+                ],
+                organization__user_roles__status=ORGANIZATION_ROLE_STATUS_ACTIVE,
+            )
         ).distinct()
 
 

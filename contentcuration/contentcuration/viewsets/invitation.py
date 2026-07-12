@@ -10,6 +10,7 @@ from rest_framework.response import Response
 from contentcuration.models import Change
 from contentcuration.models import Channel
 from contentcuration.models import Invitation
+from contentcuration.models import Organization
 from contentcuration.viewsets.base import BulkListSerializer
 from contentcuration.viewsets.base import BulkModelSerializer
 from contentcuration.viewsets.base import ValuesViewset
@@ -25,7 +26,12 @@ class InvitationSerializer(BulkModelSerializer):
     accepted = serializers.BooleanField(read_only=True)
     declined = serializers.BooleanField(read_only=True)
 
-    channel = UserFilteredPrimaryKeyRelatedField(queryset=Channel.objects.all())
+    channel = UserFilteredPrimaryKeyRelatedField(
+        queryset=Channel.objects.all(), required=False
+    )
+    organization = UserFilteredPrimaryKeyRelatedField(
+        queryset=Organization.objects.all(), required=False
+    )
 
     class Meta:
         model = Invitation
@@ -36,11 +42,23 @@ class InvitationSerializer(BulkModelSerializer):
             "revoked",
             "email",
             "channel",
+            "organization",
             "share_mode",
             "first_name",
             "last_name",
         )
         list_serializer_class = BulkListSerializer
+
+    def validate(self, data):
+        channel = data.get("channel", getattr(self.instance, "channel", None))
+        organization = data.get(
+            "organization", getattr(self.instance, "organization", None)
+        )
+        if not channel and not organization:
+            raise serializers.ValidationError(
+                "Invitation must specify either a channel or an organization."
+            )
+        return data
 
     def create(self, validated_data):
         # Need to remove default values for these non-model fields here
@@ -88,12 +106,14 @@ class InvitationSerializer(BulkModelSerializer):
 class InvitationFilter(FilterSet):
     invited = CharFilter(method="filter_invited")
     channel = CharFilter(method="filter_channel")
+    organization = CharFilter(method="filter_organization")
 
     class Meta:
         model = Invitation
         fields = (
             "invited",
             "channel",
+            "organization",
         )
 
     def filter_invited(self, queryset, name, value):
@@ -101,6 +121,9 @@ class InvitationFilter(FilterSet):
 
     def filter_channel(self, queryset, name, value):
         return queryset.filter(channel_id=value)
+
+    def filter_organization(self, queryset, name, value):
+        return queryset.filter(organization_id=value)
 
 
 def get_sender_name(item):
@@ -124,8 +147,10 @@ class InvitationViewSet(ValuesViewset):
         "sender__first_name",
         "sender__last_name",
         "channel_id",
+        "organization_id",
         "share_mode",
         "channel__name",
+        "organization__name",
     )
     field_map = {
         "first_name": "invited__first_name",
@@ -133,6 +158,8 @@ class InvitationViewSet(ValuesViewset):
         "sender_name": get_sender_name,
         "channel_name": "channel__name",
         "channel": "channel_id",
+        "organization_name": "organization__name",
+        "organization": "organization_id",
     }
 
     def perform_update(self, serializer):
@@ -163,6 +190,7 @@ class InvitationViewSet(ValuesViewset):
                 INVITATION,
                 {"accepted": True},
                 channel_id=invitation.channel_id,
+                user_id=request.user.id,
             ),
             applied=True,
             created_by_id=request.user.id,
@@ -181,6 +209,7 @@ class InvitationViewSet(ValuesViewset):
                 INVITATION,
                 {"declined": True},
                 channel_id=invitation.channel_id,
+                user_id=request.user.id,
             ),
             applied=True,
             created_by_id=request.user.id,

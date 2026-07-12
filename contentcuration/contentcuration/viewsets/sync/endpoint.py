@@ -16,6 +16,8 @@ from rest_framework.views import APIView
 from contentcuration.models import Change
 from contentcuration.models import Channel
 from contentcuration.models import CustomTaskMetadata
+from contentcuration.models import Organization
+from contentcuration.models import User
 from contentcuration.tasks import apply_channel_changes_task
 from contentcuration.tasks import apply_user_changes_task
 from contentcuration.viewsets.sync.constants import CHANNEL
@@ -65,6 +67,17 @@ class SyncView(APIView):
                 .values_list("id", flat=True)
                 .distinct()
             ).union(created_channel_ids)
+            change_organization_ids = set(
+                x.get("organization_id") for x in changes if x.get("organization_id")
+            )
+            allowed_org_ids = set(
+                Organization.filter_edit_queryset(
+                    Organization.objects.filter(id__in=change_organization_ids),
+                    request.user,
+                )
+                .values_list("id", flat=True)
+                .distinct()
+            )
             # Allow changes that are either:
             # Not related to a channel and instead related to the user if the user is the current user.
             user_only_changes = []
@@ -81,6 +94,17 @@ class SyncView(APIView):
                     user_only_changes.append(c)
                 elif c.get("channel_id") in allowed_ids:
                     channel_changes.append(c)
+                elif (
+                    c.get("channel_id") is None
+                    and c.get("organization_id") in allowed_org_ids
+                ):
+                    # Organization-scoped changes (e.g. organization invitations) have
+                    # no channel, and are frequently made by an org admin on behalf of
+                    # another user, so they can't rely on the user-self check above.
+                    # They're routed through the same per-user change queue instead of
+                    # a dedicated per-organization one, since they otherwise have the
+                    # same "no channel" shape as user-only changes.
+                    user_only_changes.append(c)
                 else:
                     disallowed_changes.append(c)
             change_models = Change.create_changes(
@@ -92,6 +116,15 @@ class SyncView(APIView):
                 apply_user_changes_task.fetch_or_enqueue(
                     request.user, user_id=request.user.id
                 )
+                other_target_user_ids = set(
+                    c.get("user_id")
+                    for c in user_only_changes
+                    if c.get("user_id") and c.get("user_id") != request.user.id
+                )
+                for target_user in User.objects.filter(id__in=other_target_user_ids):
+                    apply_user_changes_task.fetch_or_enqueue(
+                        target_user, user_id=target_user.id
+                    )
             for channel_id in allowed_ids:
                 apply_channel_changes_task.fetch_or_enqueue(
                     request.user, channel_id=channel_id
