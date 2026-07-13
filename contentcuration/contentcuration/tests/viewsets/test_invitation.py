@@ -439,6 +439,7 @@ class OrganizationInvitationSyncTestCase(SyncTestMixin, StudioAPITestCase):
             id=uuid.uuid4().hex,
             organization=self.organization,
             email=self.invited_user.email,
+            invited=self.invited_user,
             sender=self.org_admin,
         )
         self.client.force_authenticate(user=self.invited_user)
@@ -517,6 +518,7 @@ class OrganizationInvitationSyncTestCase(SyncTestMixin, StudioAPITestCase):
             channel=channel,
             organization=self.organization,
             email=self.invited_user.email,
+            invited=self.invited_user,
             sender=self.org_admin,
             share_mode="admin",
         )

@@ -23,7 +23,7 @@ def validate_table(table):
         raise ValueError("{} is not a valid table name".format(table))
 
 
-def _generate_event(key, table, event_type, channel_id, user_id):
+def _generate_event(key, table, event_type, channel_id, user_id, organization_id=None):
     validate_table(table)
     event = {
         "key": key,
@@ -34,23 +34,37 @@ def _generate_event(key, table, event_type, channel_id, user_id):
         event["channel_id"] = channel_id
     if user_id:
         event["user_id"] = user_id
+    if organization_id:
+        event["organization_id"] = organization_id
     return event
 
 
-def generate_create_event(key, table, obj, channel_id=None, user_id=None):
-    event = _generate_event(key, table, CREATED, channel_id, user_id)
+def generate_create_event(
+    key, table, obj, channel_id=None, user_id=None, organization_id=None
+):
+    event = _generate_event(
+        key, table, CREATED, channel_id, user_id, organization_id=organization_id
+    )
     event["obj"] = obj
     return event
 
 
-def generate_update_event(key, table, mods, channel_id=None, user_id=None):
-    event = _generate_event(key, table, UPDATED, channel_id, user_id)
+def generate_update_event(
+    key, table, mods, channel_id=None, user_id=None, organization_id=None
+):
+    event = _generate_event(
+        key, table, UPDATED, channel_id, user_id, organization_id=organization_id
+    )
     event["mods"] = mods
     return event
 
 
-def generate_delete_event(key, table, channel_id=None, user_id=None):
-    return _generate_event(key, table, DELETED, channel_id, user_id)
+def generate_delete_event(
+    key, table, channel_id=None, user_id=None, organization_id=None
+):
+    return _generate_event(
+        key, table, DELETED, channel_id, user_id, organization_id=organization_id
+    )
 
 
 def generate_move_event(key, table, target, position, channel_id=None, user_id=None):
