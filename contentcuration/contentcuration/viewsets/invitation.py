@@ -58,6 +58,10 @@ class InvitationSerializer(BulkModelSerializer):
             raise serializers.ValidationError(
                 "Invitation must specify either a channel or an organization."
             )
+        if channel and organization:
+            raise serializers.ValidationError(
+                "Invitation cannot specify both a channel and an organization."
+            )
         return data
 
     def create(self, validated_data):

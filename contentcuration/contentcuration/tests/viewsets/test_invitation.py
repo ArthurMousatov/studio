@@ -3,7 +3,6 @@ import uuid
 from django.urls import reverse
 
 from contentcuration import models
-from contentcuration.constants.organization_roles import ORGANIZATION_ADMIN
 from contentcuration.constants.organization_roles import ORGANIZATION_EDITOR
 from contentcuration.constants.organization_roles import (
     ORGANIZATION_ROLE_STATUS_ACTIVE,
@@ -510,37 +509,33 @@ class OrganizationInvitationSyncTestCase(SyncTestMixin, StudioAPITestCase):
         invitation.refresh_from_db()
         self.assertFalse(invitation.revoked)
 
-    def test_channel_invitation_with_organization_admin_role(self):
+    def test_invitation_with_channel_and_organization_is_rejected(self):
         channel = testdata.channel()
         channel.editors.add(self.org_admin)
-        invitation = models.Invitation.objects.create(
-            id=uuid.uuid4().hex,
-            channel=channel,
-            organization=self.organization,
-            email=self.invited_user.email,
-            invited=self.invited_user,
-            sender=self.org_admin,
-            share_mode="admin",
-        )
-        self.client.force_authenticate(user=self.invited_user)
+        invitation = {
+            "id": uuid.uuid4().hex,
+            "channel": channel.id,
+            "organization": self.organization.id,
+            "email": self.invited_user.email,
+        }
         response = self.sync_changes(
             [
-                generate_update_event(
-                    invitation.id,
+                generate_create_event(
+                    invitation["id"],
                     INVITATION,
-                    {"accepted": True},
+                    invitation,
+                    channel_id=channel.id,
+                    organization_id=self.organization.id,
                     user_id=self.invited_user.id,
                 )
             ],
         )
         self.assertEqual(response.status_code, 200, response.content)
-        invitation.refresh_from_db()
-        self.assertTrue(invitation.accepted)
-        self.assertTrue(channel.editors.filter(pk=self.invited_user.id).exists())
-        role = models.OrganizationRole.objects.get(
-            user=self.invited_user, organization=self.organization
-        )
-        self.assertEqual(role.role, ORGANIZATION_ADMIN)
+        try:
+            models.Invitation.objects.get(id=invitation["id"])
+            self.fail("Invitation with both channel and organization was created")
+        except models.Invitation.DoesNotExist:
+            pass
 
 
 class CRUDTestCase(StudioAPITestCase):
