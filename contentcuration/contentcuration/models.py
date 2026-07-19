@@ -3873,6 +3873,13 @@ class Change(models.Model):
     channel = models.ForeignKey(
         Channel, null=True, blank=True, on_delete=models.CASCADE
     )
+    # For changes related to an organization rather than a channel (e.g. organization
+    # invitations), so that they can be broadcast to anyone watching that organization,
+    # the same way channel-scoped changes are broadcast via `channel` above.
+    # Indexed by default because it's a ForeignKey field.
+    organization = models.ForeignKey(
+        "Organization", null=True, blank=True, on_delete=models.CASCADE
+    )
     # For those changes related to users, store a user value instead of channel
     # this may be different to created_by, as changes to invitations affect individual users.
     # Indexed by default because it's a ForeignKey field.
@@ -3916,6 +3923,7 @@ class Change(models.Model):
         cls,
         created_by_id=None,
         channel_id=None,
+        organization_id=None,
         user_id=None,
         session_key=None,
         applied=False,
@@ -3944,6 +3952,7 @@ class Change(models.Model):
             session_id=session_key,
             created_by_id=created_by_id,
             channel_id=channel_id,
+            organization_id=organization_id,
             user_id=user_id,
             client_rev=rev,
             table=table,
@@ -4005,6 +4014,7 @@ class Change(models.Model):
                 "table": get_attribute(change, ["table"]),
                 "type": get_attribute(change, ["change_type"]),
                 "channel_id": get_attribute(change, ["channel_id"]),
+                "organization_id": get_attribute(change, ["organization_id"]),
                 "user_id": get_attribute(change, ["user_id"]),
                 "created_by_id": get_attribute(change, ["created_by_id"]),
                 "unpublishable": get_attribute(change, ["unpublishable"]),

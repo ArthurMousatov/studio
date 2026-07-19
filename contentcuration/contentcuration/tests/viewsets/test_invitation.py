@@ -1,6 +1,7 @@
 import uuid
 
 from django.urls import reverse
+from rest_framework.test import APIClient
 
 from contentcuration import models
 from contentcuration.constants.organization_roles import ORGANIZATION_EDITOR
@@ -536,6 +537,90 @@ class OrganizationInvitationSyncTestCase(SyncTestMixin, StudioAPITestCase):
             self.fail("Invitation with both channel and organization was created")
         except models.Invitation.DoesNotExist:
             pass
+
+    def test_organization_invitation_broadcast_to_other_admin(self):
+        other_admin = testdata.user("org-admin-2@inc.com")
+        testdata.organization_role(other_admin, self.organization)
+
+        invitation = self.invitation_metadata
+        response = self.sync_changes(
+            [
+                generate_create_event(
+                    invitation["id"],
+                    INVITATION,
+                    invitation,
+                    organization_id=self.organization.id,
+                    user_id=self.invited_user.id,
+                )
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+
+        other_client = APIClient()
+        other_client.force_authenticate(user=other_admin)
+        response = other_client.post(
+            self.sync_url,
+            {
+                "changes": [],
+                "channel_revs": {},
+                "organization_revs": {self.organization.id: 0},
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        # force_authenticate() (used by both test clients here) bypasses Django's
+        # real session machinery, so every force_authenticate'd request ends up
+        # with session_key=None - which makes return_changes() misclassify this
+        # as "successes" (same session) rather than "changes" (a different
+        # session), even though these are two distinct users/clients. That
+        # session-identity distinction isn't reproducible with force_authenticate
+        # and isn't what this test is checking; what matters here is that
+        # organization_revs correctly delivered the change to this observer at
+        # all, so check both buckets rather than relying on that classification.
+        payload = response.json()
+        returned_keys = [
+            c.get("key") for c in payload["changes"] + payload["successes"]
+        ]
+        self.assertIn(invitation["id"], returned_keys)
+
+    def test_organization_invitation_not_broadcast_to_unrelated_user(self):
+        unrelated_user = testdata.user("unrelated-org-user@inc.com")
+
+        invitation = self.invitation_metadata
+        response = self.sync_changes(
+            [
+                generate_create_event(
+                    invitation["id"],
+                    INVITATION,
+                    invitation,
+                    organization_id=self.organization.id,
+                    user_id=self.invited_user.id,
+                )
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+
+        other_client = APIClient()
+        other_client.force_authenticate(user=unrelated_user)
+        response = other_client.post(
+            self.sync_url,
+            {
+                "changes": [],
+                "channel_revs": {},
+                "organization_revs": {self.organization.id: 0},
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        # organization_revs is filtered to organizations the requester can view,
+        # so an unrelated user's request for this org's revs is dropped entirely
+        # and no invitation changes come back for it, in either bucket.
+        payload = response.json()
+        returned_keys = [
+            c.get("key")
+            for c in payload.get("changes", []) + payload.get("successes", [])
+        ]
+        self.assertNotIn(invitation["id"], returned_keys)
 
 
 class CRUDTestCase(StudioAPITestCase):

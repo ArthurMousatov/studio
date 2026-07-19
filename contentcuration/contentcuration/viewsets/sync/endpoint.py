@@ -17,8 +17,8 @@ from contentcuration.models import Change
 from contentcuration.models import Channel
 from contentcuration.models import CustomTaskMetadata
 from contentcuration.models import Organization
-from contentcuration.models import User
 from contentcuration.tasks import apply_channel_changes_task
+from contentcuration.tasks import apply_organization_changes_task
 from contentcuration.tasks import apply_user_changes_task
 from contentcuration.viewsets.sync.constants import CHANNEL
 from contentcuration.viewsets.sync.constants import CREATED
@@ -83,6 +83,9 @@ class SyncView(APIView):
             user_only_changes = []
             # Related to a channel that the user is an editor for.
             channel_changes = []
+            # Not related to a channel, but related to an organization the user
+            # can edit (e.g. an org admin managing another user's invitation).
+            organization_changes = []
             # Changes that cannot be made
             disallowed_changes = []
             for c in changes:
@@ -91,6 +94,9 @@ class SyncView(APIView):
                 elif (
                     c.get("channel_id") is None and c.get("user_id") == request.user.id
                 ):
+                    # A user can always act on their own behalf, even if e.g. they
+                    # don't yet have edit rights on the organization a change also
+                    # references (accepting an org invitation is exactly this case).
                     user_only_changes.append(c)
                 elif c.get("channel_id") in allowed_ids:
                     channel_changes.append(c)
@@ -98,17 +104,11 @@ class SyncView(APIView):
                     c.get("channel_id") is None
                     and c.get("organization_id") in allowed_org_ids
                 ):
-                    # Organization-scoped changes (e.g. organization invitations) have
-                    # no channel, and are frequently made by an org admin on behalf of
-                    # another user, so they can't rely on the user-self check above.
-                    # They're routed through the same per-user change queue instead of
-                    # a dedicated per-organization one, since they otherwise have the
-                    # same "no channel" shape as user-only changes.
-                    user_only_changes.append(c)
+                    organization_changes.append(c)
                 else:
                     disallowed_changes.append(c)
             change_models = Change.create_changes(
-                user_only_changes + channel_changes,
+                user_only_changes + channel_changes + organization_changes,
                 created_by_id=request.user.id,
                 session_key=session_key,
             )
@@ -116,18 +116,26 @@ class SyncView(APIView):
                 apply_user_changes_task.fetch_or_enqueue(
                     request.user, user_id=request.user.id
                 )
-                other_target_user_ids = set(
-                    c.get("user_id")
-                    for c in user_only_changes
-                    if c.get("user_id") and c.get("user_id") != request.user.id
-                )
-                for target_user in User.objects.filter(id__in=other_target_user_ids):
-                    apply_user_changes_task.fetch_or_enqueue(
-                        target_user, user_id=target_user.id
-                    )
             for channel_id in allowed_ids:
                 apply_channel_changes_task.fetch_or_enqueue(
                     request.user, channel_id=channel_id
+                )
+            # A change can end up with organization_id set even when it was routed
+            # via the self-only check above (e.g. a user accepting their own org
+            # invitation, who isn't an org member yet and so isn't in
+            # allowed_org_ids). apply_user_changes_task excludes anything with
+            # organization_id set, so without this such a change would never be
+            # picked up by any task. Cover every organization_id that actually
+            # ended up on a change, not just the ones routed via the dedicated
+            # organization_changes bucket.
+            all_organization_ids = allowed_org_ids.union(
+                c.get("organization_id")
+                for c in user_only_changes + organization_changes
+                if c.get("organization_id")
+            )
+            for organization_id in all_organization_ids:
+                apply_organization_changes_task.fetch_or_enqueue(
+                    request.user, organization_id=organization_id
                 )
             allowed_changes = [
                 {"rev": c.client_rev, "server_rev": c.server_rev} for c in change_models
@@ -150,7 +158,24 @@ class SyncView(APIView):
             }
         return channel_revs
 
-    def return_changes(self, request, channel_revs):
+    def get_organization_revs(self, request):
+        organization_revs = request.data.get("organization_revs", {})
+        if organization_revs:
+            # Filter to only the organizations that the user has permissions to view.
+            organization_ids = (
+                Organization.filter_view_queryset(
+                    Organization.objects.all(), request.user
+                )
+                .filter(id__in=organization_revs.keys())
+                .values_list("id", flat=True)
+            )
+            organization_revs = {
+                organization_id: organization_revs[organization_id]
+                for organization_id in organization_ids
+            }
+        return organization_revs
+
+    def return_changes(self, request, channel_revs, organization_revs):
         user_rev = request.data.get("user_rev") or 0
         unapplied_revs = request.data.get("unapplied_revs", [])
         session_key = request.session.session_key
@@ -175,12 +200,20 @@ class SyncView(APIView):
                 & relevant_to_session_filter
             )
 
+        for organization_id, rev in organization_revs.items():
+            change_filter |= (
+                Q(organization_id=organization_id)
+                & (unapplied_revs_filter | Q(server_rev__gt=rev))
+                & relevant_to_session_filter
+            )
+
         changes_to_return = list(
             Change.objects.filter(change_filter)
             .values(
                 "server_rev",
                 "session_id",
                 "channel_id",
+                "organization_id",
                 "user_id",
                 "created_by_id",
                 "applied",
@@ -228,6 +261,7 @@ class SyncView(APIView):
                 task_name__in=[
                     apply_channel_changes_task.name,
                     apply_user_changes_task.name,
+                    apply_organization_changes_task.name,
                 ]
             )
             .annotate(
@@ -265,10 +299,13 @@ class SyncView(APIView):
         }
 
         channel_revs = self.get_channel_revs(request)
+        organization_revs = self.get_organization_revs(request)
 
         response_payload.update(self.handle_changes(request))
 
-        response_payload.update(self.return_changes(request, channel_revs))
+        response_payload.update(
+            self.return_changes(request, channel_revs, organization_revs)
+        )
 
         response_payload.update(self.return_tasks(request, channel_revs))
 
