@@ -1,21 +1,35 @@
 import base64
+import logging
 from dataclasses import dataclass
+from dataclasses import field
 from typing import Any
 from typing import Dict
 from typing import List
+from typing import Optional
 from typing import Tuple
 
 from le_utils.constants import exercises
 
 from contentcuration.utils.assessment.markdown import render_markdown
 from contentcuration.utils.assessment.qti.assessment_item import AssessmentItem
+from contentcuration.utils.assessment.qti.assessment_item import BaseValue
 from contentcuration.utils.assessment.qti.assessment_item import CorrectResponse
+from contentcuration.utils.assessment.qti.assessment_item import FieldValue
 from contentcuration.utils.assessment.qti.assessment_item import ItemBody
 from contentcuration.utils.assessment.qti.assessment_item import OutcomeDeclaration
+from contentcuration.utils.assessment.qti.assessment_item import ResponseCondition
 from contentcuration.utils.assessment.qti.assessment_item import ResponseDeclaration
+from contentcuration.utils.assessment.qti.assessment_item import ResponseElse
+from contentcuration.utils.assessment.qti.assessment_item import ResponseIf
 from contentcuration.utils.assessment.qti.assessment_item import ResponseProcessing
+from contentcuration.utils.assessment.qti.assessment_item import SetOutcomeValue
 from contentcuration.utils.assessment.qti.assessment_item import Value
+from contentcuration.utils.assessment.qti.assessment_item import Variable
 from contentcuration.utils.assessment.qti.base import ElementTreeBase
+from contentcuration.utils.assessment.qti.catalog import Card
+from contentcuration.utils.assessment.qti.catalog import Catalog
+from contentcuration.utils.assessment.qti.catalog import CatalogInfo
+from contentcuration.utils.assessment.qti.catalog import HtmlContent
 from contentcuration.utils.assessment.qti.constants import BaseType
 from contentcuration.utils.assessment.qti.constants import Cardinality
 from contentcuration.utils.assessment.qti.constants import Orientation
@@ -23,6 +37,9 @@ from contentcuration.utils.assessment.qti.constants import ShowHide
 from contentcuration.utils.assessment.qti.html import Div
 from contentcuration.utils.assessment.qti.html import FlowContentList
 from contentcuration.utils.assessment.qti.html import P
+from contentcuration.utils.assessment.qti.interaction_types.custom import (
+    CustomInteraction,
+)
 from contentcuration.utils.assessment.qti.interaction_types.simple import (
     ChoiceInteraction,
 )
@@ -58,6 +75,7 @@ class LegacyAssessmentItem:
     assessment_id: str
     title: str
     language: str
+    hints: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -73,6 +91,40 @@ def _create_html_content_from_text(text: str) -> FlowContentList:
         return []
     markup = render_markdown(text)
     return ElementTreeBase.from_string(markup)
+
+
+def _create_catalog_info(item: LegacyAssessmentItem) -> Optional[CatalogInfo]:
+    """Build the dormant hint catalog, or None if the item has no usable hints."""
+    try:
+        sorted_hints = sorted(item.hints, key=lambda hint: hint.get("order", 0))
+    except TypeError:
+        # A mixed-type or otherwise incomparable "order" value must not crash
+        # the channel publish - fall back to input order, same as base.py's
+        # ExerciseArchiveGenerator._sort_by_order.
+        logging.warning(
+            "Unable to sort hints for assessment item %s, leaving unsorted.",
+            item.assessment_id,
+        )
+        sorted_hints = item.hints
+    cards = []
+    for hint in sorted_hints:
+        text = hint.get("hint")
+        if not text or not text.strip():
+            # Log + skip rather than crash the channel publish or emit an
+            # empty card - matches the per-item log+skip preference.
+            logging.warning(
+                "Skipping hint with no text for assessment item %s",
+                item.assessment_id,
+            )
+            continue
+        cards.append(
+            Card(
+                html_content=HtmlContent(children=_create_html_content_from_text(text))
+            )
+        )
+    if not cards:
+        return None
+    return CatalogInfo(catalog=[Catalog(id_="kolibri-hints", card=cards)])
 
 
 def _response_declaration(
@@ -166,6 +218,86 @@ def _create_text_entry_interaction_and_response(
     return interaction, response_declaration
 
 
+def build_perseus_custom_interaction_item(
+    assessment_id: str, perseus_path: str, title: str, language: str
+) -> QTIConversionResult:
+    """
+    Wrap a raw Perseus question in a schema-valid ``qti-assessment-item`` whose
+    body is a single ``qti-custom-interaction`` (``data-type="perseus"``).
+
+    The host's Perseus renderer owns rendering and grading, but the result is
+    handled as a complete QTI question. The renderer reports its outcome through
+    the ``RESPONSE`` variable as a record with fields ``correct`` (boolean),
+    ``simpleAnswer`` (string) and ``answerState`` (an arbitrary object). The
+    record declaration specifies no schema, so each field carries its own
+    base-type at runtime and ``answerState`` need not be stringified.
+    Response processing reads the ``correct`` field and sets
+    the ``SCORE`` outcome to 1 (correct) or 0 (incorrect) - the standard
+    correct/incorrect grading, expressed inline because no standard response
+    processing template can inspect a record field.
+
+    The Perseus JSON and its assets are declared as package files by the
+    generator, not tracked from this XML, so ``file_dependencies`` is empty.
+    """
+    identifier = hex_to_qti_id(assessment_id)
+
+    item = AssessmentItem(
+        identifier=identifier,
+        title=title,
+        language=language,
+        adaptive=False,
+        time_dependent=False,
+        response_declaration=[
+            ResponseDeclaration(
+                identifier="RESPONSE",
+                cardinality=Cardinality.RECORD,
+            )
+        ],
+        outcome_declaration=[
+            OutcomeDeclaration(
+                identifier="SCORE",
+                cardinality=Cardinality.SINGLE,
+                base_type=BaseType.FLOAT,
+            )
+        ],
+        item_body=ItemBody(
+            children=[
+                CustomInteraction(
+                    response_identifier="RESPONSE",
+                    data_type="perseus",
+                    data_perseus_path=perseus_path,
+                )
+            ]
+        ),
+        response_processing=ResponseProcessing(
+            children=[
+                ResponseCondition(
+                    response_if=ResponseIf(
+                        field_value=FieldValue(
+                            field_identifier="correct",
+                            variable=Variable(identifier="RESPONSE"),
+                        ),
+                        set_outcome_value=SetOutcomeValue(
+                            identifier="SCORE",
+                            base_value=BaseValue(base_type=BaseType.FLOAT, value="1"),
+                        ),
+                    ),
+                    response_else=ResponseElse(
+                        set_outcome_value=SetOutcomeValue(
+                            identifier="SCORE",
+                            base_value=BaseValue(base_type=BaseType.FLOAT, value="0"),
+                        ),
+                    ),
+                )
+            ]
+        ),
+    )
+
+    xml = f'<?xml version="1.0" encoding="UTF-8"?>\n{item.to_xml_string()}'
+
+    return QTIConversionResult(identifier=identifier, xml=xml, file_dependencies=[])
+
+
 def convert_legacy_assessment_item_to_qti(
     item: LegacyAssessmentItem,
 ) -> QTIConversionResult:
@@ -201,6 +333,7 @@ def convert_legacy_assessment_item_to_qti(
         response_declaration=[response_declaration],
         outcome_declaration=[outcome_declaration],
         item_body=item_body,
+        catalog_info=_create_catalog_info(item),
         response_processing=response_processing,
     )
 

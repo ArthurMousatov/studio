@@ -4,6 +4,7 @@ import random
 import string
 import tempfile
 import uuid
+import zipfile
 from unittest import mock
 
 import pytest
@@ -16,9 +17,11 @@ from kolibri_content import models as kolibri_models
 from kolibri_content.router import cleanup_content_database_connection
 from kolibri_content.router import get_active_content_database
 from kolibri_content.router import set_active_content_database
+from le_utils.constants import content_kinds
 from le_utils.constants import exercises
 from le_utils.constants import format_presets
 from le_utils.constants import modalities
+from le_utils.constants.format_presets import RENDERABLE_PRESETS_ORDER
 from le_utils.constants.labels import accessibility_categories
 from le_utils.constants.labels import learning_activities
 from le_utils.constants.labels import levels
@@ -35,6 +38,7 @@ from .testdata import node as create_node
 from .testdata import slideshow
 from .testdata import thumbnail_bytes
 from .testdata import tree
+from .utils.qti.test_validation import _item_xml
 from .utils.qti.test_validation import VALID_CHOICE_ITEM
 from .utils.restricted_filesystemstorage import RestrictedFileSystemStorage
 from contentcuration import models as cc
@@ -55,6 +59,28 @@ from contentcuration.utils.publish import set_channel_icon_encoding
 from contentcuration.viewsets.base import create_change_tracker
 
 pytestmark = pytest.mark.django_db
+
+# A schema-valid native QTI item whose single interaction (order) Perseus cannot
+# express, so a node containing it must publish QTI only.
+UNSUPPORTED_QTI_ITEM = _item_xml(
+    "item_unsupported",
+    "Unsupported Item",
+    '<qti-response-declaration identifier="RESPONSE" cardinality="ordered" base-type="identifier">'
+    "<qti-correct-response>"
+    "<qti-value>choice_0</qti-value>"
+    "<qti-value>choice_1</qti-value>"
+    "</qti-correct-response>"
+    "</qti-response-declaration>",
+    '<qti-order-interaction response-identifier="RESPONSE">'
+    "<qti-prompt>Put these in order.</qti-prompt>"
+    '<qti-simple-choice identifier="choice_0" fixed="false">First</qti-simple-choice>'
+    '<qti-simple-choice identifier="choice_1" fixed="false">Second</qti-simple-choice>'
+    "</qti-order-interaction>",
+)
+
+
+# Larger than the signed 32-bit maximum (2_147_483_647); ~3 GB.
+LARGE_FILE_SIZE = 3 * 1024 ** 3
 
 
 def description():
@@ -282,6 +308,29 @@ class ExportChannelTestCase(StudioTestCase):
             randomize=False,
         )
 
+        # Native QTI item whose interaction Perseus cannot express -> QTI only
+        native_qti_unsupported_exercise = create_node(
+            {
+                "kind_id": "exercise",
+                "title": "Native QTI Unsupported Exercise",
+                "extra_fields": qti_extra_fields,
+            }
+        )
+        native_qti_unsupported_exercise.complete = True
+        native_qti_unsupported_exercise.parent = current_exercise.parent
+        native_qti_unsupported_exercise.save()
+        cc.AssessmentItem.objects.create(
+            contentnode=native_qti_unsupported_exercise,
+            assessment_id=uuid.uuid4().hex,
+            type=exercises.QTI,
+            question="",
+            answers="[]",
+            hints="[]",
+            raw_data=UNSUPPORTED_QTI_ITEM,
+            order=1,
+            randomize=False,
+        )
+
         # Only legacy structured-field items, no perseus_question -> must now route to QTI (was Perseus)
         legacy_no_perseus_exercise = create_node(
             {
@@ -325,6 +374,42 @@ class ExportChannelTestCase(StudioTestCase):
             hints="[]",
             raw_data="{}",
             order=1,
+            randomize=False,
+        )
+
+        # A node mixing a native QTI item with a raw perseus_question item ->
+        # must route to a single QTI package (Perseus embedded as custom
+        # interactions), not a separate Perseus archive.
+        mixed_perseus_qti_exercise = create_node(
+            {
+                "kind_id": "exercise",
+                "title": "Perseus + Native QTI Mixed Exercise",
+                "extra_fields": qti_extra_fields,
+            }
+        )
+        mixed_perseus_qti_exercise.complete = True
+        mixed_perseus_qti_exercise.parent = current_exercise.parent
+        mixed_perseus_qti_exercise.save()
+        cc.AssessmentItem.objects.create(
+            contentnode=mixed_perseus_qti_exercise,
+            assessment_id=uuid.uuid4().hex,
+            type=exercises.QTI,
+            question="",
+            answers="[]",
+            hints="[]",
+            raw_data=VALID_CHOICE_ITEM,
+            order=1,
+            randomize=False,
+        )
+        cc.AssessmentItem.objects.create(
+            contentnode=mixed_perseus_qti_exercise,
+            assessment_id=uuid.uuid4().hex,
+            type=exercises.PERSEUS_QUESTION,
+            question="",
+            answers="[]",
+            hints="[]",
+            raw_data="{}",
+            order=2,
             randomize=False,
         )
 
@@ -456,6 +541,36 @@ class ExportChannelTestCase(StudioTestCase):
         lesson_topic.extra_fields = {"options": {"modality": modalities.LESSON}}
         lesson_topic.save()
 
+        document_kind, _ = cc.ContentKind.objects.get_or_create(
+            kind=content_kinds.DOCUMENT
+        )
+        large_file_node = cc.ContentNode(
+            kind=document_kind,
+            parent=self.content_channel.main_tree,
+            title="Large file node",
+            node_id=uuid.uuid4(),
+            content_id=uuid.uuid4(),
+            sort_order=1,
+            complete=True,
+        )
+        large_file_node.save()
+
+        large_db_file = create_studio_file(
+            b"large file body", preset="document", ext="pdf"
+        )["db_file"]
+        # A >2.1 GB file cannot fit the legacy 32-bit File.file_size column; its
+        # true size lives in the studio#5974 file_size_bigint shadow, with the
+        # legacy file_size left NULL.
+        large_db_file.file_size = None
+        large_db_file.contentnode = large_file_node
+        large_db_file.save()
+        # Set the shadow directly; the mirror trigger leaves it alone because
+        # file_size is unchanged (NULL).
+        cc.File.objects.filter(pk=large_db_file.pk).update(
+            file_size_bigint=LARGE_FILE_SIZE
+        )
+        self.large_file_checksum = large_db_file.checksum
+
         set_channel_icon_encoding(self.content_channel)
         self.tempdb = create_content_database(
             self.content_channel, True, self.admin_user.id, True
@@ -574,6 +689,69 @@ class ExportChannelTestCase(StudioTestCase):
         assert files.count() > 0
         for file in files.prefetch_related("local_file"):
             self.assertEqual(file.file_size, file.local_file.file_size)
+
+    def test_localfile_file_size_bigint_matches_small_files(self):
+        # Files that fit in 32 bits write the same value to both columns.
+        local_files = kolibri_models.LocalFile.objects.exclude(
+            pk=self.large_file_checksum
+        )
+        assert local_files.count() > 0
+        for local_file in local_files:
+            self.assertEqual(local_file.file_size_bigint, local_file.file_size)
+
+    def test_localfile_large_file_size_bigint(self):
+        # A >2.1 GB file keeps its real size in file_size_bigint and NULLs the
+        # legacy 32-bit file_size.
+        local_file = kolibri_models.LocalFile.objects.get(pk=self.large_file_checksum)
+        self.assertEqual(local_file.file_size_bigint, LARGE_FILE_SIZE)
+        self.assertIsNone(local_file.file_size)
+
+    def test_file_included_presets_renderable(self):
+        # Every non-supplementary (renderable) exported file carries its own
+        # preset bit. A mixed Perseus + native QTI package additionally sets the
+        # exercise bit (see test_mixed_qti_file_included_presets); no other file
+        # is augmented.
+        files = kolibri_models.File.objects.filter(supplementary=False)
+        assert files.count() > 0
+        exercise_bit = 2 ** RENDERABLE_PRESETS_ORDER.index(format_presets.EXERCISE)
+        for file in files:
+            own_bit = 2 ** RENDERABLE_PRESETS_ORDER.index(file.preset)
+            if file.preset == format_presets.QTI_ZIP:
+                self.assertIn(file.included_presets, (own_bit, own_bit | exercise_bit))
+            else:
+                self.assertEqual(file.included_presets, own_bit)
+
+    def test_file_included_presets_supplementary_null(self):
+        # Supplementary files (e.g. thumbnails) leave included_presets NULL.
+        files = kolibri_models.File.objects.filter(supplementary=True)
+        assert files.count() > 0
+        for file in files:
+            self.assertIsNone(file.included_presets)
+
+    def test_mixed_qti_file_included_presets(self):
+        # A mixed Perseus + native QTI package embeds raw Perseus questions as
+        # custom interactions, so its qti File must also flag the exercise
+        # (Perseus) renderer via included_presets = qti | exercise.
+        qti_bit = 2 ** RENDERABLE_PRESETS_ORDER.index(format_presets.QTI_ZIP)
+        exercise_bit = 2 ** RENDERABLE_PRESETS_ORDER.index(format_presets.EXERCISE)
+
+        mixed_node = kolibri_models.ContentNode.objects.get(
+            title="Perseus + Native QTI Mixed Exercise"
+        )
+        mixed_qti_file = kolibri_models.File.objects.get(
+            contentnode=mixed_node, preset=format_presets.QTI_ZIP
+        )
+        self.assertEqual(mixed_qti_file.included_presets, qti_bit | exercise_bit)
+
+        # A native-QTI-only node embeds no Perseus questions, so its qti File
+        # keeps only the qti bit (guards against over-tagging).
+        native_node = kolibri_models.ContentNode.objects.get(
+            title="Native QTI Exercise"
+        )
+        native_qti_file = kolibri_models.File.objects.get(
+            contentnode=native_node, preset=format_presets.QTI_ZIP
+        )
+        self.assertEqual(native_qti_file.included_presets, qti_bit)
 
     def test_channel_icon_encoding(self):
         self.assertIsNotNone(self.content_channel.icon_encoding)
@@ -779,8 +957,36 @@ class ExportChannelTestCase(StudioTestCase):
             "QTI file should be a zip archive",
         )
 
-    def test_native_qti_item_routes_to_qti_packaging(self):
+    def test_native_qti_choice_item_publishes_both_archives(self):
         node = cc.ContentNode.objects.get(title="Native QTI Exercise")
+        self.assertTrue(node.files.filter(preset_id=format_presets.QTI_ZIP).exists())
+        self.assertTrue(node.files.filter(preset_id=format_presets.EXERCISE).exists())
+
+    def test_native_qti_perseus_ids_match_assessment_metadata(self):
+        """The derived Perseus item JSON filenames must equal the ids recorded
+        in the published node's ``AssessmentMetaData.assessment_item_ids`` (the
+        QTI manifest ``K``-ids), so older Kolibri resolves the derived items."""
+        node = cc.ContentNode.objects.get(title="Native QTI Exercise")
+        exercise_file = node.files.get(preset_id=format_presets.EXERCISE)
+        with exercise_file.file_on_disk.open("rb") as file_handle:
+            item_stems = {
+                name[: -len(".json")]
+                for name in zipfile.ZipFile(file_handle).namelist()
+                if name.endswith(".json") and name != "exercise.json"
+            }
+
+        published_node = kolibri_models.ContentNode.objects.get(
+            title="Native QTI Exercise"
+        )
+        assessment_item_ids = set(
+            published_node.assessmentmetadata.first().assessment_item_ids
+        )
+
+        self.assertTrue(item_stems)
+        self.assertEqual(item_stems, assessment_item_ids)
+
+    def test_native_qti_unsupported_interaction_publishes_qti_only(self):
+        node = cc.ContentNode.objects.get(title="Native QTI Unsupported Exercise")
         self.assertTrue(node.files.filter(preset_id=format_presets.QTI_ZIP).exists())
         self.assertFalse(node.files.filter(preset_id=format_presets.EXERCISE).exists())
 
@@ -793,6 +999,11 @@ class ExportChannelTestCase(StudioTestCase):
         node = cc.ContentNode.objects.get(title="Perseus Only Exercise")
         self.assertTrue(node.files.filter(preset_id=format_presets.EXERCISE).exists())
         self.assertFalse(node.files.filter(preset_id=format_presets.QTI_ZIP).exists())
+
+    def test_mixed_perseus_and_native_qti_routes_to_qti(self):
+        node = cc.ContentNode.objects.get(title="Perseus + Native QTI Mixed Exercise")
+        self.assertTrue(node.files.filter(preset_id=format_presets.QTI_ZIP).exists())
+        self.assertFalse(node.files.filter(preset_id=format_presets.EXERCISE).exists())
 
     def test_qti_archive_contains_manifest_and_assessment_ids(self):
 

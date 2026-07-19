@@ -4,9 +4,16 @@ import unittest
 from le_utils.constants import exercises
 
 from contentcuration.utils.assessment.qti.convert import (
+    build_perseus_custom_interaction_item,
+)
+from contentcuration.utils.assessment.qti.convert import (
     convert_legacy_assessment_item_to_qti,
 )
+from contentcuration.utils.assessment.qti.convert import hex_to_qti_id
 from contentcuration.utils.assessment.qti.convert import LegacyAssessmentItem
+from contentcuration.utils.assessment.qti.interaction_types.custom import (
+    CustomInteraction,
+)
 from contentcuration.utils.assessment.qti.validation import validate_qti_item
 
 
@@ -30,6 +37,7 @@ def _make_item(
     randomize=False,
     title="Test Question 1",
     language="en-US",
+    hints=None,
 ):
     return LegacyAssessmentItem(
         type=type,
@@ -39,6 +47,7 @@ def _make_item(
         assessment_id=assessment_id,
         title=title,
         language=language,
+        hints=hints or [],
     )
 
 
@@ -230,6 +239,65 @@ class TextEntryInteractionConversionTests(unittest.TestCase):
         )
 
 
+class CustomInteractionTests(unittest.TestCase):
+    ASSESSMENT_ID = "2b1c3d4e5f60718293a4b5c6d7e8f900"
+
+    def _build_item(self):
+        return build_perseus_custom_interaction_item(
+            self.ASSESSMENT_ID,
+            f"perseus/{self.ASSESSMENT_ID}.json",
+            "Q 1",
+            "en",
+        )
+
+    def test_custom_interaction_element_and_attributes(self):
+        interaction = CustomInteraction(
+            response_identifier="RESPONSE",
+            data_type="perseus",
+            data_perseus_path="perseus/abc.json",
+        )
+
+        xml = interaction.to_xml_string()
+
+        self.assertEqual(
+            _normalize_xml(
+                '<qti-custom-interaction response-identifier="RESPONSE" '
+                'data-type="perseus" data-perseus-path="perseus/abc.json" />'
+            ),
+            _normalize_xml(xml),
+        )
+
+    def test_builder_identifier_and_validity(self):
+        result = self._build_item()
+
+        self.assertEqual(result.identifier, hex_to_qti_id(self.ASSESSMENT_ID))
+        self.assertEqual(result.file_dependencies, [])
+        self.assertTrue(validate_qti_item(result.xml.encode("utf-8")).is_valid)
+        self.assertIn('data-type="perseus"', result.xml)
+        self.assertIn(
+            f'data-perseus-path="perseus/{self.ASSESSMENT_ID}.json"', result.xml
+        )
+
+    def test_builder_grades_from_record_correct_field(self):
+        """
+        The Perseus renderer reports its result through a record RESPONSE, and
+        the item grades itself off that record's ``correct`` field.
+        """
+        result = self._build_item()
+
+        normalized = _normalize_xml(result.xml)
+        # RESPONSE is a record so it can carry correct/simpleAnswer/answerState.
+        self.assertIn(
+            '<qti-response-declaration identifier="RESPONSE" cardinality="record"',
+            normalized,
+        )
+        # SCORE outcome plus response processing that reads the correct field.
+        self.assertIn('<qti-outcome-declaration identifier="SCORE"', normalized)
+        self.assertIn('<qti-field-value field-identifier="correct">', normalized)
+        self.assertIn('<qti-variable identifier="RESPONSE"', normalized)
+        self.assertIn('<qti-set-outcome-value identifier="SCORE">', normalized)
+
+
 class UnsupportedTypeConversionTests(unittest.TestCase):
     def test_unsupported_type_raises(self):
         item = _make_item(
@@ -244,3 +312,89 @@ class UnsupportedTypeConversionTests(unittest.TestCase):
             convert_legacy_assessment_item_to_qti(item)
 
         self.assertIn("Unsupported question type", str(ctx.exception))
+
+
+class CatalogInfoConversionTests(unittest.TestCase):
+    def _item_with_hints(self, hints, assessment_id="1234567890abcdef1234567890abcdef"):
+        return _make_item(
+            type=exercises.SINGLE_SELECTION,
+            question="What is 2+2?",
+            answers=[
+                {"answer": "4", "correct": True, "order": 1},
+                {"answer": "3", "correct": False, "order": 2},
+            ],
+            assessment_id=assessment_id,
+            hints=hints,
+        )
+
+    def test_no_hints_produces_no_catalog_info(self):
+        item = self._item_with_hints([])
+        result = convert_legacy_assessment_item_to_qti(item)
+        self.assertNotIn("<qti-catalog-info", result.xml)
+        self.assertTrue(validate_qti_item(result.xml.encode("utf-8")).is_valid)
+
+    def test_multi_hint_ordering_is_independent_of_input_list_order(self):
+        item = self._item_with_hints(
+            [
+                {"hint": "Second hint", "order": 2},
+                {"hint": "First hint", "order": 1},
+            ]
+        )
+        result = convert_legacy_assessment_item_to_qti(item)
+        self.assertEqual(result.xml.count('support="ext:kolibri-hint"'), 2)
+        self.assertLess(result.xml.index("First hint"), result.xml.index("Second hint"))
+        self.assertLess(
+            result.xml.index("</qti-item-body>"), result.xml.index("<qti-catalog-info>")
+        )
+        self.assertLess(
+            result.xml.index("</qti-catalog-info>"),
+            result.xml.index("<qti-response-processing"),
+        )
+        self.assertTrue(validate_qti_item(result.xml.encode("utf-8")).is_valid)
+
+    def test_hint_with_image_registers_file_dependency(self):
+        item = self._item_with_hints(
+            [{"hint": "See ![diagram](images/hint123.png)", "order": 1}]
+        )
+        result = convert_legacy_assessment_item_to_qti(item)
+        self.assertIn('<img alt="diagram" src="images/hint123.png" />', result.xml)
+        self.assertIn("images/hint123.png", result.file_dependencies)
+        self.assertTrue(validate_qti_item(result.xml.encode("utf-8")).is_valid)
+
+    def test_hint_missing_order_key_does_not_raise(self):
+        # A malformed hint must degrade gracefully rather than raise: an uncaught
+        # exception here would abort the entire channel's publish, not just this item.
+        item = self._item_with_hints([{"hint": "Undated hint"}])
+        result = convert_legacy_assessment_item_to_qti(item)
+        self.assertIn("Undated hint", result.xml)
+        self.assertTrue(validate_qti_item(result.xml.encode("utf-8")).is_valid)
+
+    def test_hint_with_incomparable_order_values_does_not_raise(self):
+        # A mixed-type "order" (e.g. a string alongside an int, or None) makes
+        # sorted() raise TypeError - this must fall back to input order rather
+        # than crash the channel publish.
+        item = self._item_with_hints(
+            [{"hint": "First hint", "order": 1}, {"hint": "Second hint", "order": "2"}]
+        )
+        result = convert_legacy_assessment_item_to_qti(item)
+        self.assertEqual(result.xml.count('support="ext:kolibri-hint"'), 2)
+        self.assertIn("First hint", result.xml)
+        self.assertIn("Second hint", result.xml)
+        self.assertTrue(validate_qti_item(result.xml.encode("utf-8")).is_valid)
+
+    def test_hint_missing_text_key_is_logged_and_skipped(self):
+        # Graceful-degradation contract for a hint dict with no "hint" value:
+        # log + skip it, never crash the channel publish. With this the only
+        # hint, no card survives, so no qti-catalog-info is emitted at all.
+        item = self._item_with_hints([{"order": 1}])
+        result = convert_legacy_assessment_item_to_qti(item)
+        self.assertNotIn("<qti-catalog-info", result.xml)
+        self.assertTrue(validate_qti_item(result.xml.encode("utf-8")).is_valid)
+
+    def test_partial_malformed_hints_keep_valid_siblings(self):
+        # A malformed hint is skipped while its valid siblings still render.
+        item = self._item_with_hints([{"hint": "Real hint", "order": 1}, {"order": 2}])
+        result = convert_legacy_assessment_item_to_qti(item)
+        self.assertEqual(result.xml.count('support="ext:kolibri-hint"'), 1)
+        self.assertIn("Real hint", result.xml)
+        self.assertTrue(validate_qti_item(result.xml.encode("utf-8")).is_valid)
