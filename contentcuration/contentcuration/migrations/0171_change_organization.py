@@ -6,7 +6,7 @@ from django.db import models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("contentcuration", "0169_invitation_organization"),
+        ("contentcuration", "0170_merge_20260717_0136"),
     ]
 
     operations = [
