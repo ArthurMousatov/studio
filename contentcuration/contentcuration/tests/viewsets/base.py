@@ -106,7 +106,7 @@ class SyncTestMixin(EagerTasksTestMixin):
     def sync_url(self):
         return reverse("sync")
 
-    def sync_changes(self, changes, organization_revs=None):
+    def sync_changes(self, changes):
         channel_ids = set(c.get("channel_id") for c in changes)
         channel_revs = {}
         for channel_id in channel_ids:
@@ -114,11 +114,7 @@ class SyncTestMixin(EagerTasksTestMixin):
                 channel_revs[channel_id] = 0
         return self.client.post(
             self.sync_url,
-            {
-                "changes": changes,
-                "channel_revs": channel_revs,
-                "organization_revs": organization_revs or {},
-            },
+            {"changes": changes, "channel_revs": channel_revs},
             format="json",
         )
 

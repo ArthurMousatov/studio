@@ -34,11 +34,7 @@ def apply_user_changes_task(self, user_id):
     from contentcuration.viewsets.sync.base import apply_changes
 
     changes_qs = Change.objects.filter(
-        applied=False,
-        errored=False,
-        user_id=user_id,
-        channel__isnull=True,
-        organization__isnull=True,
+        applied=False, errored=False, user_id=user_id, channel__isnull=True
     )
     apply_changes(changes_qs)
     if changes_qs.exists():
@@ -55,25 +51,6 @@ def apply_channel_changes_task(self, channel_id):
 
     changes_qs = Change.objects.filter(
         applied=False, errored=False, channel_id=channel_id
-    )
-    apply_changes(changes_qs)
-    if changes_qs.exists():
-        self.requeue()
-
-
-@app.task(bind=True, name="apply_organization_changes")
-def apply_organization_changes_task(self, organization_id):
-    """
-    :type self: contentcuration.utils.celery.tasks.CeleryTask
-    :param organization_id: The organization ID for which to process changes
-    """
-    from contentcuration.viewsets.sync.base import apply_changes
-
-    changes_qs = Change.objects.filter(
-        applied=False,
-        errored=False,
-        organization_id=organization_id,
-        channel__isnull=True,
     )
     apply_changes(changes_qs)
     if changes_qs.exists():

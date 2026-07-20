@@ -87,7 +87,6 @@ class InvitationSerializer(BulkModelSerializer):
                         "accepted": True,
                     },
                     channel_id=instance.channel_id,
-                    organization_id=instance.organization_id,
                 )
             )
 
@@ -193,7 +192,6 @@ class InvitationViewSet(ValuesViewset):
                 INVITATION,
                 {"accepted": True},
                 channel_id=invitation.channel_id,
-                organization_id=invitation.organization_id,
                 user_id=request.user.id,
             ),
             applied=True,
@@ -213,7 +211,6 @@ class InvitationViewSet(ValuesViewset):
                 INVITATION,
                 {"declined": True},
                 channel_id=invitation.channel_id,
-                organization_id=invitation.organization_id,
                 user_id=request.user.id,
             ),
             applied=True,
