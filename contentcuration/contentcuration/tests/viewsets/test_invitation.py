@@ -537,6 +537,194 @@ class OrganizationInvitationSyncTestCase(SyncTestMixin, StudioAPITestCase):
         except models.Invitation.DoesNotExist:
             pass
 
+    def test_create_organization_invitation_without_user_id(self):
+        # A client is not required to (and, per _routes_to_actor below, cannot
+        # meaningfully) supply user_id for an org-scoped change - routing is
+        # derived server-side from the actor. This must not silently drop the
+        # change.
+        invitation = self.invitation_metadata
+        response = self.sync_changes(
+            [
+                generate_create_event(
+                    invitation["id"],
+                    INVITATION,
+                    invitation,
+                    organization_id=self.organization.id,
+                )
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        try:
+            models.Invitation.objects.get(id=invitation["id"])
+        except models.Invitation.DoesNotExist:
+            self.fail(
+                "Organization invitation without a client-supplied user_id "
+                "was not created"
+            )
+
+    def test_organization_invitation_change_routes_to_actor(self):
+        # A client-supplied user_id must not be trusted as the routing
+        # target, since that would let an org admin inject a change into an
+        # arbitrary user's sync feed. The Change row should always be tagged
+        # with the actor's own id.
+        unrelated_user = testdata.user("unrelated-target@inc.com")
+        invitation = self.invitation_metadata
+        response = self.sync_changes(
+            [
+                generate_create_event(
+                    invitation["id"],
+                    INVITATION,
+                    invitation,
+                    organization_id=self.organization.id,
+                    user_id=unrelated_user.id,
+                )
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        change = models.Change.objects.get(
+            table=INVITATION, kwargs__key=invitation["id"]
+        )
+        self.assertEqual(change.user_id, self.org_admin.id)
+        self.assertNotEqual(change.user_id, unrelated_user.id)
+
+    def test_create_organization_invitation_for_different_org_is_rejected(self):
+        other_organization = testdata.organization()
+        invitation = self.invitation_metadata
+        invitation["organization"] = other_organization.id
+        response = self.sync_changes(
+            [
+                generate_create_event(
+                    invitation["id"],
+                    INVITATION,
+                    invitation,
+                    organization_id=other_organization.id,
+                    user_id=self.invited_user.id,
+                )
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        try:
+            models.Invitation.objects.get(id=invitation["id"])
+            self.fail(
+                "Invitation was created for an organization the admin doesn't manage"
+            )
+        except models.Invitation.DoesNotExist:
+            pass
+
+    def test_revoke_organization_invitation_by_different_admin(self):
+        other_admin = testdata.user("org-admin-3@inc.com")
+        testdata.organization_role(other_admin, self.organization)
+
+        invitation = models.Invitation.objects.create(
+            id=uuid.uuid4().hex,
+            organization=self.organization,
+            email=self.invited_user.email,
+            sender=self.org_admin,
+        )
+        self.client.force_authenticate(user=other_admin)
+        response = self.sync_changes(
+            [
+                generate_update_event(
+                    invitation.id,
+                    INVITATION,
+                    {"revoked": True},
+                    organization_id=self.organization.id,
+                    user_id=self.invited_user.id,
+                )
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        invitation.refresh_from_db()
+        self.assertTrue(invitation.revoked)
+
+    def test_delete_organization_invitation(self):
+        invitation = models.Invitation.objects.create(
+            id=uuid.uuid4().hex,
+            organization=self.organization,
+            email=self.invited_user.email,
+            sender=self.org_admin,
+        )
+        response = self.sync_changes(
+            [
+                generate_delete_event(
+                    invitation.id,
+                    INVITATION,
+                    organization_id=self.organization.id,
+                    user_id=self.invited_user.id,
+                )
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        try:
+            models.Invitation.objects.get(id=invitation.id)
+            self.fail("Organization invitation was not deleted")
+        except models.Invitation.DoesNotExist:
+            pass
+
+    def test_accept_organization_invitation_created_via_sync(self):
+        # Unlike the fixtures above (which set `invited` directly via the
+        # ORM), an invitation created through the sync API - the real
+        # creation path - never gets `invited` populated. The real invitee
+        # must still be able to accept it.
+        invitation = self.invitation_metadata
+        response = self.sync_changes(
+            [
+                generate_create_event(
+                    invitation["id"],
+                    INVITATION,
+                    invitation,
+                    organization_id=self.organization.id,
+                )
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        created = models.Invitation.objects.get(id=invitation["id"])
+        self.assertIsNone(created.invited)
+
+        self.client.force_authenticate(user=self.invited_user)
+        response = self.sync_changes(
+            [
+                generate_update_event(
+                    invitation["id"],
+                    INVITATION,
+                    {"accepted": True},
+                    user_id=self.invited_user.id,
+                )
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        created.refresh_from_db()
+        self.assertTrue(created.accepted)
+        self.assertTrue(
+            models.OrganizationRole.objects.filter(
+                user=self.invited_user, organization=self.organization
+            ).exists()
+        )
+
+    def test_list_invitations_filtered_by_organization(self):
+        invitation = models.Invitation.objects.create(
+            id=uuid.uuid4().hex,
+            organization=self.organization,
+            email=self.invited_user.email,
+            sender=self.org_admin,
+        )
+        other_organization = testdata.organization()
+        other_invitation = models.Invitation.objects.create(
+            id=uuid.uuid4().hex,
+            organization=other_organization,
+            email=self.invited_user.email,
+            sender=self.org_admin,
+        )
+        response = self.client.get(
+            reverse("invitation-list"), {"organization": self.organization.id}
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        results = payload["results"] if isinstance(payload, dict) else payload
+        returned_ids = [item["id"] for item in results]
+        self.assertIn(invitation.id, returned_ids)
+        self.assertNotIn(other_invitation.id, returned_ids)
+
 
 class CRUDTestCase(StudioAPITestCase):
     @property

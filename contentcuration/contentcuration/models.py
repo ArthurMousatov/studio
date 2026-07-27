@@ -1907,6 +1907,7 @@ class Organization(models.Model):
             user_roles__user=user,
             user_roles__role=ORGANIZATION_ADMIN,
             user_roles__status=ORGANIZATION_ROLE_STATUS_ACTIVE,
+            deleted=False,
         ).distinct()
 
     @classmethod
@@ -1925,6 +1926,7 @@ class Organization(models.Model):
                 ORGANIZATION_VIEWER,
             ],
             user_roles__status=ORGANIZATION_ROLE_STATUS_ACTIVE,
+            deleted=False,
         ).distinct()
 
 

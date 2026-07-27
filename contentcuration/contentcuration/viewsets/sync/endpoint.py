@@ -17,11 +17,11 @@ from contentcuration.models import Change
 from contentcuration.models import Channel
 from contentcuration.models import CustomTaskMetadata
 from contentcuration.models import Organization
-from contentcuration.models import User
 from contentcuration.tasks import apply_channel_changes_task
 from contentcuration.tasks import apply_user_changes_task
 from contentcuration.viewsets.sync.constants import CHANNEL
 from contentcuration.viewsets.sync.constants import CREATED
+from contentcuration.viewsets.sync.constants import INVITATION
 from contentcuration.viewsets.sync.constants import SERVER_ONLY_CHANGES
 
 
@@ -96,16 +96,22 @@ class SyncView(APIView):
                     channel_changes.append(c)
                 elif (
                     c.get("channel_id") is None
+                    and c.get("table") == INVITATION
                     and c.get("organization_id") in allowed_org_ids
                 ):
-                    # Organization-scoped changes (e.g. an org admin creating or
-                    # revoking another user's invitation) have no channel, and the
-                    # actor isn't necessarily the target user, so they can't rely
-                    # on the self-only check above. There's no dedicated broadcast
-                    # mechanism for organizations (see PR discussion) - this just
-                    # needs the change to be accepted and applied, so it's routed
-                    # through the existing per-user queue, tagging the target user
-                    # rather than the actor.
+                    # Organization-scoped invitation changes (e.g. an org admin
+                    # creating or revoking another user's invitation) have no
+                    # channel, and the actor isn't necessarily the target user,
+                    # so they can't rely on the self-only check above. Trusting
+                    # a client-supplied user_id here would let an org admin
+                    # inject a change into an arbitrary user's sync feed (or
+                    # silently drop it if user_id is omitted), so the routing
+                    # target is derived server-side from the actor instead -
+                    # apply_changes() already runs under the actor's
+                    # permissions via sync_initial(change.created_by). Scoped
+                    # to the invitation table specifically, since nothing else
+                    # currently understands organization_id.
+                    c["user_id"] = request.user.id
                     user_only_changes.append(c)
                 else:
                     disallowed_changes.append(c)
@@ -118,15 +124,6 @@ class SyncView(APIView):
                 apply_user_changes_task.fetch_or_enqueue(
                     request.user, user_id=request.user.id
                 )
-                other_target_user_ids = set(
-                    c.get("user_id")
-                    for c in user_only_changes
-                    if c.get("user_id") and c.get("user_id") != request.user.id
-                )
-                for target_user in User.objects.filter(id__in=other_target_user_ids):
-                    apply_user_changes_task.fetch_or_enqueue(
-                        target_user, user_id=target_user.id
-                    )
             for channel_id in allowed_ids:
                 apply_channel_changes_task.fetch_or_enqueue(
                     request.user, channel_id=channel_id

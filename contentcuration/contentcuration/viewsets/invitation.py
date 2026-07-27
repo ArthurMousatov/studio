@@ -50,9 +50,9 @@ class InvitationSerializer(BulkModelSerializer):
         list_serializer_class = BulkListSerializer
 
     def validate(self, data):
-        channel = data.get("channel", getattr(self.instance, "channel", None))
+        channel = data.get("channel", getattr(self.instance, "channel_id", None))
         organization = data.get(
-            "organization", getattr(self.instance, "organization", None)
+            "organization", getattr(self.instance, "organization_id", None)
         )
         if not channel and not organization:
             raise serializers.ValidationError(
@@ -98,10 +98,24 @@ class InvitationSerializer(BulkModelSerializer):
 
         # allow invitation state to be modified under the right conditions
         if request and request.user and self.instance:
-            if self.instance.invited == request.user:
+            # Match on email rather than the `invited` FK, since `invited` is
+            # only ever populated by the channel email-invite flow - it's
+            # never set for invitations created through the sync API, which
+            # would otherwise leave the real invitee unable to accept/decline.
+            if (request.user.email or "").lower() == (
+                self.instance.email or ""
+            ).lower():
                 fields["accepted"].read_only = self.instance.revoked
                 fields["declined"].read_only = False
             if self.instance.sender == request.user:
+                fields["revoked"].read_only = False
+            if (
+                self.instance.organization_id
+                and Organization.filter_edit_queryset(
+                    Organization.objects.filter(id=self.instance.organization_id),
+                    request.user,
+                ).exists()
+            ):
                 fields["revoked"].read_only = False
 
         return fields
