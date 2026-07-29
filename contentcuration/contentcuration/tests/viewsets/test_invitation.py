@@ -7,6 +7,7 @@ from contentcuration.constants.organization_roles import ORGANIZATION_EDITOR
 from contentcuration.constants.organization_roles import (
     ORGANIZATION_ROLE_STATUS_ACTIVE,
 )
+from contentcuration.models import ADMIN_ACCESS
 from contentcuration.tests import testdata
 from contentcuration.tests.base import StudioAPITestCase
 from contentcuration.tests.viewsets.base import generate_create_event
@@ -144,6 +145,32 @@ class SyncTestCase(SyncTestMixin, StudioAPITestCase):
             ).exists()
         )
         self.assertTrue(models.Change.objects.filter(channel=self.channel).exists())
+
+    def test_update_invitation_accept_admin_share_mode_grants_editor_access(self):
+        # A channel invitation's "co-owner" share_mode (admin) documents
+        # existing behavior rather than introducing a new access tier:
+        # _accept_channel_invitation only special-cases VIEW_ACCESS, so
+        # anything else - including "admin" - grants the same editor access
+        # as "edit". This locks that in as intended, confirmed behavior.
+        invitation = models.Invitation.objects.create(
+            share_mode=ADMIN_ACCESS, **self.invitation_db_metadata
+        )
+
+        self.client.force_authenticate(user=self.invited_user)
+        response = self.sync_changes(
+            [
+                generate_update_event(
+                    invitation.id,
+                    INVITATION,
+                    {"accepted": True},
+                    user_id=self.invited_user.id,
+                )
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        invitation.refresh_from_db()
+        self.assertTrue(invitation.accepted)
+        self.assertTrue(self.channel.editors.filter(pk=self.invited_user.id).exists())
 
     def test_update_invitation_revoke(self):
 
