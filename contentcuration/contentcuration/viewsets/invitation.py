@@ -87,6 +87,7 @@ class InvitationSerializer(BulkModelSerializer):
                         "accepted": True,
                     },
                     channel_id=instance.channel_id,
+                    user_id=self.context["request"].user.id,
                 )
             )
 
