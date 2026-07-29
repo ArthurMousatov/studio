@@ -40,19 +40,33 @@ def generate_copy_event(*args, **kwargs):
 
 
 def generate_create_event(*args, **kwargs):
+    # organization_id isn't a parameter of the production event builders (no
+    # production code emits it - real clients send it as a plain dict key,
+    # not through this Python function), but tests need to be able to attach
+    # it to simulate what a real client payload would contain, since
+    # handle_changes() reads it directly off the raw incoming dict.
+    organization_id = kwargs.pop("organization_id", None)
     event = base_generate_create_event(*args, **kwargs)
+    if organization_id:
+        event["organization_id"] = organization_id
     event["rev"] = random.randint(1, 10000000)
     return event
 
 
 def generate_delete_event(*args, **kwargs):
+    organization_id = kwargs.pop("organization_id", None)
     event = base_generate_delete_event(*args, **kwargs)
+    if organization_id:
+        event["organization_id"] = organization_id
     event["rev"] = random.randint(1, 10000000)
     return event
 
 
 def generate_update_event(*args, **kwargs):
+    organization_id = kwargs.pop("organization_id", None)
     event = base_generate_update_event(*args, **kwargs)
+    if organization_id:
+        event["organization_id"] = organization_id
     event["rev"] = random.randint(1, 10000000)
     return event
 

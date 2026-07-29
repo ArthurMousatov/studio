@@ -762,6 +762,23 @@ class CRUDTestCase(StudioAPITestCase):
         )
         self.assertEqual(response.status_code, 405, response.content)
 
+    def test_create_organization_invitation(self):
+        organization = testdata.organization()
+        org_admin = testdata.user("crud-org-admin@inc.com")
+        testdata.organization_role(org_admin, organization)
+        self.client.force_authenticate(user=org_admin)
+        invitation = {
+            "id": uuid.uuid4().hex,
+            "organization": organization.id,
+            "email": self.invited_user.email,
+        }
+        response = self.client.post(
+            reverse("invitation-list"),
+            invitation,
+            format="json",
+        )
+        self.assertEqual(response.status_code, 405, response.content)
+
     def test_update_invitation_accept(self):
         invitation = models.Invitation.objects.create(**self.invitation_db_metadata)
 
