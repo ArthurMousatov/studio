@@ -74,8 +74,14 @@ class InvitationSerializer(BulkModelSerializer):
 
     def update(self, instance, validated_data):
         instance = super(InvitationSerializer, self).update(instance, validated_data)
-        accepted = self.initial_data.get("accepted") or instance.accepted
-        revoked = self.initial_data.get("revoked") or instance.revoked
+        # Read from validated_data, not initial_data (the raw client mods
+        # dict) - get_fields() correctly keeps accepted/revoked read-only for
+        # anyone but the invitee/sender, but initial_data bypasses that,
+        # letting e.g. an org admin force instance.accept() (and thus an
+        # active OrganizationRole) onto an invitation that isn't theirs to
+        # accept, even though the field itself stays correctly unwritten.
+        accepted = validated_data.get("accepted") or instance.accepted
+        revoked = validated_data.get("revoked") or instance.revoked
 
         if accepted and not revoked:
             instance.accept()

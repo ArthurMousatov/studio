@@ -664,6 +664,38 @@ class OrganizationInvitationSyncTestCase(SyncTestMixin, StudioAPITestCase):
         invitation.refresh_from_db()
         self.assertTrue(invitation.revoked)
 
+    def test_admin_cannot_force_accept_on_behalf_of_invitee(self):
+        # Org-admin edit rights on the queryset must not let an admin trigger
+        # instance.accept() on someone else's invitation by syncing
+        # {"accepted": true} themselves - accepted is correctly kept
+        # read-only for them (get_fields), so this must be a no-op, not a
+        # silent OrganizationRole grant.
+        invitation = models.Invitation.objects.create(
+            id=uuid.uuid4().hex,
+            organization=self.organization,
+            email=self.invited_user.email,
+            sender=self.org_admin,
+        )
+        response = self.sync_changes(
+            [
+                generate_update_event(
+                    invitation.id,
+                    INVITATION,
+                    {"accepted": True},
+                    organization_id=self.organization.id,
+                    user_id=self.invited_user.id,
+                )
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        invitation.refresh_from_db()
+        self.assertFalse(invitation.accepted)
+        self.assertFalse(
+            models.OrganizationRole.objects.filter(
+                user=self.invited_user, organization=self.organization
+            ).exists()
+        )
+
     def test_delete_organization_invitation(self):
         invitation = models.Invitation.objects.create(
             id=uuid.uuid4().hex,
